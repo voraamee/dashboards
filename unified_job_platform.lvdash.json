@@ -1,0 +1,1417 @@
+{
+  "datasets": [
+    {
+      "name": "job_run_summary",
+      "displayName": "job_run_summary",
+      "queryLines": [
+        "\nSELECT CAST(r.workspace_id AS STRING) AS workspace_id,\n  COALESCE(w.workspace_name, CAST(r.workspace_id AS STRING)) AS workspace_name,\n  r.result_state,\n  COUNT(*) AS total_runs,\n  SUM(CASE WHEN r.result_state='SUCCEEDED' THEN 1 ELSE 0 END) AS succeeded,\n  SUM(CASE WHEN r.result_state IN ('FAILED','ERROR','TIMED_OUT') THEN 1 ELSE 0 END) AS failed,\n  SUM(CASE WHEN r.result_state IS NULL OR r.result_state='RUNNING' THEN 1 ELSE 0 END) AS running\nFROM main.cost_management.job_runs_latest r\nLEFT JOIN main.cost_management.synced_workspaces w ON r.workspace_id=w.workspace_id\nWHERE r.period_start_time >= date_sub(current_date(), 30)\nGROUP BY r.workspace_id, w.workspace_name, r.result_state "
+      ]
+    },
+    {
+      "name": "job_runs_daily",
+      "displayName": "job_runs_daily",
+      "queryLines": [
+        "\nSELECT DATE(r.period_start_time) AS run_date,\n  COALESCE(w.workspace_name, CAST(r.workspace_id AS STRING)) AS workspace_name,\n  COUNT(*) AS total_runs,\n  SUM(CASE WHEN r.result_state='SUCCEEDED' THEN 1 ELSE 0 END) AS succeeded,\n  SUM(CASE WHEN r.result_state IN ('FAILED','ERROR','TIMED_OUT') THEN 1 ELSE 0 END) AS failed\nFROM main.cost_management.job_runs_latest r\nLEFT JOIN main.cost_management.synced_workspaces w ON r.workspace_id=w.workspace_id\nWHERE r.period_start_time >= date_sub(current_date(), 30)\nGROUP BY DATE(r.period_start_time), w.workspace_name "
+      ]
+    },
+    {
+      "name": "job_runs_by_type",
+      "displayName": "job_runs_by_type",
+      "queryLines": [
+        "\nSELECT COALESCE(w.workspace_name, CAST(r.workspace_id AS STRING)) AS workspace_name,\n  COALESCE(r.run_type,'UNKNOWN') AS run_type, COUNT(*) AS run_count\nFROM main.cost_management.job_runs_latest r\nLEFT JOIN main.cost_management.synced_workspaces w ON r.workspace_id=w.workspace_id\nWHERE r.period_start_time >= date_sub(current_date(), 30)\nGROUP BY w.workspace_name, COALESCE(r.run_type,'UNKNOWN') "
+      ]
+    },
+    {
+      "name": "job_runs_list",
+      "displayName": "job_runs_list",
+      "queryLines": [
+        "\nSELECT CAST(r.workspace_id AS STRING) AS workspace_id,\n  COALESCE(w.workspace_name, CAST(r.workspace_id AS STRING)) AS workspace_name,\n  CAST(r.job_id AS BIGINT) AS job_id,\n  COALESCE(j.name, CAST(r.job_id AS STRING)) AS job_name,\n  CAST(r.run_id AS BIGINT) AS run_id,\n  COALESCE(r.result_state,'RUNNING') AS result_state,\n  r.run_type, r.trigger_type, r.termination_code, r.repair_count,\n  r.period_start_time AS start_time, r.period_end_time AS end_time,\n  ROUND(r.execution_duration_seconds/60.0,2) AS duration_minutes,\n  j.creator_user_name,\n  CONCAT(REGEXP_REPLACE(w.workspace_url,'/+$',''),'/jobs/',CAST(r.job_id AS STRING),'/runs/',CAST(r.run_id AS STRING)) AS run_url\nFROM main.cost_management.job_runs_latest r\nLEFT JOIN main.cost_management.jobs_latest j ON r.job_id=j.job_id AND r.workspace_id=j.workspace_id\nLEFT JOIN main.cost_management.synced_workspaces w ON r.workspace_id=w.workspace_id\nWHERE r.period_start_time >= date_sub(current_date(), 30)\nORDER BY r.period_start_time DESC LIMIT 10000 "
+      ]
+    },
+    {
+      "name": "job_concurrency",
+      "displayName": "job_concurrency",
+      "queryLines": [
+        "\nWITH time_series AS (\n  SELECT explode(sequence(date_trunc('HOUR', current_timestamp() - make_dt_interval(0,24)),\n    current_timestamp(), make_dt_interval(0,0,15))) AS bucket)\nSELECT ts.bucket,\n  COALESCE(w.workspace_name, CAST(r.workspace_id AS STRING)) AS workspace_name,\n  COUNT(*) AS concurrent_runs\nFROM time_series ts\nJOIN main.cost_management.job_runs_latest r ON ts.bucket >= r.period_start_time\n  AND ts.bucket <= COALESCE(r.period_end_time, current_timestamp())\nLEFT JOIN main.cost_management.synced_workspaces w ON r.workspace_id=w.workspace_id\nWHERE r.period_start_time <= current_timestamp()\n  AND COALESCE(r.period_end_time, current_timestamp()) >= current_timestamp() - make_dt_interval(0,24)\nGROUP BY ts.bucket, w.workspace_name "
+      ]
+    },
+    {
+      "name": "failing_jobs",
+      "displayName": "failing_jobs",
+      "queryLines": [
+        "\nSELECT COALESCE(w.workspace_name, CAST(r.workspace_id AS STRING)) AS workspace_name,\n  CAST(r.job_id AS BIGINT) AS job_id,\n  COALESCE(j.name, CAST(r.job_id AS STRING)) AS job_name,\n  CONCAT(COALESCE(j.name, CAST(r.job_id AS STRING)),' @ ',COALESCE(w.workspace_name, CAST(r.workspace_id AS STRING))) AS job_label,\n  COUNT(*) AS total_runs,\n  SUM(CASE WHEN r.result_state IN ('FAILED','ERROR','TIMED_OUT') THEN 1 ELSE 0 END) AS failed_runs,\n  ROUND(100.0*SUM(CASE WHEN r.result_state='SUCCEEDED' THEN 1 ELSE 0 END)/NULLIF(COUNT(*),0),2) AS success_rate_pct,\n  MAX(CASE WHEN r.result_state IN ('FAILED','ERROR','TIMED_OUT') THEN r.period_start_time END) AS last_failure\nFROM main.cost_management.job_runs_latest r\nLEFT JOIN main.cost_management.jobs_latest j ON r.job_id=j.job_id AND r.workspace_id=j.workspace_id\nLEFT JOIN main.cost_management.synced_workspaces w ON r.workspace_id=w.workspace_id\nWHERE r.period_start_time >= date_sub(current_date(), 30)\nGROUP BY w.workspace_name, r.job_id, j.name, r.workspace_id\nHAVING COUNT(*) >= 3 AND SUM(CASE WHEN r.result_state IN ('FAILED','ERROR','TIMED_OUT') THEN 1 ELSE 0 END) > 0\nORDER BY failed_runs DESC LIMIT 100 "
+      ]
+    },
+    {
+      "name": "prolonged_jobs",
+      "displayName": "prolonged_jobs",
+      "queryLines": [
+        "\nWITH baseline AS (\n  SELECT workspace_id, job_id, AVG(execution_duration_seconds) AS avg_dur\n  FROM main.cost_management.job_runs_latest WHERE result_state='SUCCEEDED'\n    AND period_start_time >= date_sub(current_date(),30)\n  GROUP BY workspace_id, job_id)\nSELECT COALESCE(w.workspace_name, CAST(r.workspace_id AS STRING)) AS workspace_name,\n  CAST(r.job_id AS BIGINT) AS job_id,\n  COALESCE(j.name, CAST(r.job_id AS STRING)) AS job_name,\n  CAST(r.run_id AS BIGINT) AS run_id, r.period_start_time AS start_time,\n  ROUND((unix_timestamp(current_timestamp())-unix_timestamp(r.period_start_time))/3600.0,2) AS current_hours,\n  ROUND(b.avg_dur,0) AS avg_duration_seconds,\n  ROUND((unix_timestamp(current_timestamp())-unix_timestamp(r.period_start_time))/NULLIF(b.avg_dur,0),2) AS vs_avg_ratio\nFROM main.cost_management.job_runs_latest r\nLEFT JOIN main.cost_management.jobs_latest j ON r.job_id=j.job_id AND r.workspace_id=j.workspace_id\nLEFT JOIN main.cost_management.synced_workspaces w ON r.workspace_id=w.workspace_id\nLEFT JOIN baseline b ON r.workspace_id=b.workspace_id AND r.job_id=b.job_id\nWHERE r.result_state IS NULL AND r.period_start_time >= date_sub(current_date(),7)\n  AND (unix_timestamp(current_timestamp())-unix_timestamp(r.period_start_time)) > 2*3600\nORDER BY current_hours DESC LIMIT 100 "
+      ]
+    },
+    {
+      "name": "repair_stats",
+      "displayName": "repair_stats",
+      "queryLines": [
+        "\nSELECT COALESCE(w.workspace_name, CAST(r.workspace_id AS STRING)) AS workspace_name,\n  CAST(r.job_id AS BIGINT) AS job_id,\n  COALESCE(j.name, CAST(r.job_id AS STRING)) AS job_name,\n  COUNT(*) AS total_runs,\n  SUM(CASE WHEN r.repair_count>0 THEN 1 ELSE 0 END) AS runs_with_repairs,\n  SUM(r.repair_count) AS total_repairs, MAX(r.repair_count) AS max_repairs_on_one_run,\n  ROUND(100.0*SUM(CASE WHEN r.repair_count>0 THEN 1 ELSE 0 END)/NULLIF(COUNT(*),0),2) AS repair_rate_pct,\n  SUM(CASE WHEN r.repair_count>0 AND r.result_state<>'SUCCEEDED' THEN 1 ELSE 0 END) AS repaired_but_still_failing\nFROM main.cost_management.job_runs_latest r\nLEFT JOIN main.cost_management.jobs_latest j ON r.job_id=j.job_id AND r.workspace_id=j.workspace_id\nLEFT JOIN main.cost_management.synced_workspaces w ON r.workspace_id=w.workspace_id\nWHERE r.period_start_time >= date_sub(current_date(), 30)\nGROUP BY w.workspace_name, r.job_id, j.name\nHAVING SUM(r.repair_count) > 0\nORDER BY total_repairs DESC LIMIT 100 "
+      ]
+    },
+    {
+      "name": "duration_percentiles",
+      "displayName": "duration_percentiles",
+      "queryLines": [
+        "\nSELECT COALESCE(w.workspace_name, CAST(r.workspace_id AS STRING)) AS workspace_name,\n  CAST(r.job_id AS BIGINT) AS job_id,\n  COALESCE(j.name, CAST(r.job_id AS STRING)) AS job_name,\n  COUNT(*) AS run_count,\n  ROUND(PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY r.execution_duration_seconds),2) AS p50_seconds,\n  ROUND(PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY r.execution_duration_seconds),2) AS p95_seconds,\n  ROUND(PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY r.execution_duration_seconds),2) AS p99_seconds\nFROM main.cost_management.job_runs_latest r\nLEFT JOIN main.cost_management.jobs_latest j ON r.job_id=j.job_id AND r.workspace_id=j.workspace_id\nLEFT JOIN main.cost_management.synced_workspaces w ON r.workspace_id=w.workspace_id\nWHERE r.period_start_time >= date_sub(current_date(), 30) AND r.result_state='SUCCEEDED'\nGROUP BY w.workspace_name, r.job_id, j.name\nHAVING COUNT(*) >= 5 ORDER BY p50_seconds DESC LIMIT 100 "
+      ]
+    },
+    {
+      "name": "task_runs_list",
+      "displayName": "task_runs_list",
+      "queryLines": [
+        "\nSELECT COALESCE(w.workspace_name, CAST(t.workspace_id AS STRING)) AS workspace_name,\n  CAST(t.job_id AS BIGINT) AS job_id,\n  COALESCE(j.name, CAST(t.job_id AS STRING)) AS job_name,\n  CAST(t.parent_run_id AS BIGINT) AS job_run_id, t.task_key AS task_name,\n  COALESCE(t.result_state,'RUNNING') AS result_state, t.repair_count,\n  t.period_start_time AS start_time,\n  ROUND(t.execution_duration_seconds/60.0,2) AS duration_minutes\nFROM main.cost_management.task_runs_latest t\nLEFT JOIN main.cost_management.jobs_latest j ON t.job_id=j.job_id AND t.workspace_id=j.workspace_id\nLEFT JOIN main.cost_management.synced_workspaces w ON t.workspace_id=w.workspace_id\nWHERE t.period_start_time >= date_sub(current_date(), 30)\nORDER BY t.period_start_time DESC LIMIT 10000 "
+      ]
+    },
+    {
+      "name": "task_failures",
+      "displayName": "task_failures",
+      "queryLines": [
+        "\nSELECT COALESCE(w.workspace_name, CAST(t.workspace_id AS STRING)) AS workspace_name,\n  CONCAT(COALESCE(j.name, CAST(t.job_id AS STRING)),' / ',t.task_key) AS task_label,\n  COUNT(*) AS total_runs,\n  SUM(CASE WHEN t.result_state IN ('FAILED','ERROR','TIMED_OUT') THEN 1 ELSE 0 END) AS failed_runs,\n  ROUND(100.0*SUM(CASE WHEN t.result_state='SUCCEEDED' THEN 1 ELSE 0 END)/NULLIF(COUNT(*),0),2) AS success_rate_pct\nFROM main.cost_management.task_runs_latest t\nLEFT JOIN main.cost_management.jobs_latest j ON t.job_id=j.job_id AND t.workspace_id=j.workspace_id\nLEFT JOIN main.cost_management.synced_workspaces w ON t.workspace_id=w.workspace_id\nWHERE t.period_start_time >= date_sub(current_date(), 30)\nGROUP BY w.workspace_name, j.name, t.job_id, t.task_key\nHAVING COUNT(*) >= 3 AND SUM(CASE WHEN t.result_state IN ('FAILED','ERROR','TIMED_OUT') THEN 1 ELSE 0 END) > 0\nORDER BY failed_runs DESC LIMIT 100 "
+      ]
+    }
+  ],
+  "pages": [
+    {
+      "name": "page-7f3e25e6",
+      "displayName": "Overview",
+      "pageType": "PAGE_TYPE_CANVAS",
+      "layout": [
+        {
+          "widget": {
+            "name": "ov-title",
+            "multilineTextboxSpec": {
+              "lines": [
+                "## Unified Job Platform \u2014 Operational Observability"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 6,
+            "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "ov-sub",
+            "multilineTextboxSpec": {
+              "lines": [
+                "Job and task run health across all workspaces. Filter by workspace, job or status. 30-day window."
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 1,
+            "width": 6,
+            "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "ov-total",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "job_run_summary",
+                  "fields": [
+                    {
+                      "name": "sum(total_runs)",
+                      "expression": "SUM(`total_runs`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "sum(total_runs)",
+                  "displayName": "Total Runs"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Total Runs"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 2,
+            "width": 2,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "ov-succ",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "job_run_summary",
+                  "fields": [
+                    {
+                      "name": "sum(succeeded)",
+                      "expression": "SUM(`succeeded`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "sum(succeeded)",
+                  "displayName": "Succeeded"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Succeeded"
+              }
+            }
+          },
+          "position": {
+            "x": 2,
+            "y": 2,
+            "width": 2,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "ov-fail",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "job_run_summary",
+                  "fields": [
+                    {
+                      "name": "sum(failed)",
+                      "expression": "SUM(`failed`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "sum(failed)",
+                  "displayName": "Failed"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Failed"
+              }
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 2,
+            "width": 2,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "ov-trend-h",
+            "multilineTextboxSpec": {
+              "lines": [
+                "### Daily run volume"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 5,
+            "width": 6,
+            "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "ov-daily",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "job_runs_daily",
+                  "fields": [
+                    {
+                      "name": "run_date",
+                      "expression": "`run_date`"
+                    },
+                    {
+                      "name": "sum(succeeded)",
+                      "expression": "SUM(`succeeded`)"
+                    },
+                    {
+                      "name": "sum(failed)",
+                      "expression": "SUM(`failed`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "line",
+              "encodings": {
+                "x": {
+                  "fieldName": "run_date",
+                  "scale": {
+                    "type": "temporal"
+                  },
+                  "displayName": "run_date"
+                },
+                "y": {
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "fields": [
+                    {
+                      "fieldName": "sum(succeeded)",
+                      "displayName": "sum(succeeded)"
+                    },
+                    {
+                      "fieldName": "sum(failed)",
+                      "displayName": "sum(failed)"
+                    }
+                  ]
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Runs by day"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 6,
+            "width": 4,
+            "height": 5
+          }
+        },
+        {
+          "widget": {
+            "name": "ov-type",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "job_runs_by_type",
+                  "fields": [
+                    {
+                      "name": "run_type",
+                      "expression": "`run_type`"
+                    },
+                    {
+                      "name": "sum(run_count)",
+                      "expression": "SUM(`run_count`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "pie",
+              "encodings": {
+                "angle": {
+                  "fieldName": "sum(run_count)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Run type mix"
+                },
+                "color": {
+                  "fieldName": "run_type",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "run_type"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Run type mix"
+              }
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 6,
+            "width": 2,
+            "height": 5
+          }
+        }
+      ]
+    },
+    {
+      "name": "page-7da50e2b",
+      "displayName": "Jobs",
+      "pageType": "PAGE_TYPE_CANVAS",
+      "layout": [
+        {
+          "widget": {
+            "name": "jb-h",
+            "multilineTextboxSpec": {
+              "lines": [
+                "### Concurrent runs (last 24h)"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 6,
+            "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "jb-conc",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "job_concurrency",
+                  "fields": [
+                    {
+                      "name": "bucket",
+                      "expression": "`bucket`"
+                    },
+                    {
+                      "name": "sum(concurrent_runs)",
+                      "expression": "SUM(`concurrent_runs`)"
+                    },
+                    {
+                      "name": "workspace_name",
+                      "expression": "`workspace_name`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "line",
+              "encodings": {
+                "x": {
+                  "fieldName": "bucket",
+                  "scale": {
+                    "type": "temporal"
+                  },
+                  "displayName": "bucket"
+                },
+                "y": {
+                  "fieldName": "sum(concurrent_runs)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Concurrent runs"
+                },
+                "color": {
+                  "fieldName": "workspace_name",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "workspace_name"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Concurrent runs"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 1,
+            "width": 6,
+            "height": 5
+          }
+        },
+        {
+          "widget": {
+            "name": "jb-th",
+            "multilineTextboxSpec": {
+              "lines": [
+                "### Recent job runs"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 6,
+            "width": 6,
+            "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "jb-runs",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "job_runs_list",
+                  "fields": [
+                    {
+                      "name": "workspace_name",
+                      "expression": "`workspace_name`"
+                    },
+                    {
+                      "name": "job_name",
+                      "expression": "`job_name`"
+                    },
+                    {
+                      "name": "run_id",
+                      "expression": "`run_id`"
+                    },
+                    {
+                      "name": "result_state",
+                      "expression": "`result_state`"
+                    },
+                    {
+                      "name": "run_type",
+                      "expression": "`run_type`"
+                    },
+                    {
+                      "name": "start_time",
+                      "expression": "`start_time`"
+                    },
+                    {
+                      "name": "duration_minutes",
+                      "expression": "`duration_minutes`"
+                    },
+                    {
+                      "name": "repair_count",
+                      "expression": "`repair_count`"
+                    },
+                    {
+                      "name": "termination_code",
+                      "expression": "`termination_code`"
+                    },
+                    {
+                      "name": "creator_user_name",
+                      "expression": "`creator_user_name`"
+                    },
+                    {
+                      "name": "run_url",
+                      "expression": "`run_url`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "workspace_name",
+                    "displayName": "Workspace"
+                  },
+                  {
+                    "fieldName": "job_name",
+                    "displayName": "Job"
+                  },
+                  {
+                    "fieldName": "run_id",
+                    "displayName": "Run"
+                  },
+                  {
+                    "fieldName": "result_state",
+                    "displayName": "Status"
+                  },
+                  {
+                    "fieldName": "run_type",
+                    "displayName": "Type"
+                  },
+                  {
+                    "fieldName": "start_time",
+                    "displayName": "Start"
+                  },
+                  {
+                    "fieldName": "duration_minutes",
+                    "displayName": "Duration (min)"
+                  },
+                  {
+                    "fieldName": "repair_count",
+                    "displayName": "Repairs"
+                  },
+                  {
+                    "fieldName": "termination_code",
+                    "displayName": "Term code"
+                  },
+                  {
+                    "fieldName": "creator_user_name",
+                    "displayName": "Creator"
+                  },
+                  {
+                    "fieldName": "run_url",
+                    "displayName": "Link"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Job runs"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 7,
+            "width": 6,
+            "height": 8
+          }
+        }
+      ]
+    },
+    {
+      "name": "page-6a2e4ab9",
+      "displayName": "Health",
+      "pageType": "PAGE_TYPE_CANVAS",
+      "layout": [
+        {
+          "widget": {
+            "name": "hl-h1",
+            "multilineTextboxSpec": {
+              "lines": [
+                "### Jobs by failure count"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 6,
+            "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "hl-fail-bar",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "failing_jobs",
+                  "fields": [
+                    {
+                      "name": "job_label",
+                      "expression": "`job_label`"
+                    },
+                    {
+                      "name": "sum(failed_runs)",
+                      "expression": "SUM(`failed_runs`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "job_label",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "y-reversed"
+                    }
+                  },
+                  "displayName": "job_label"
+                },
+                "y": {
+                  "fieldName": "sum(failed_runs)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Failing jobs"
+                },
+                "label": {
+                  "show": true
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Failing jobs"
+              },
+              "mark": {
+                "colors": [
+                  "#FF3621",
+                  "#FFAB00",
+                  "#00A972",
+                  "#8BCAE7"
+                ]
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 1,
+            "width": 6,
+            "height": 5
+          }
+        },
+        {
+          "widget": {
+            "name": "hl-h2",
+            "multilineTextboxSpec": {
+              "lines": [
+                "### Failing jobs detail"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 6,
+            "width": 6,
+            "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "hl-fail",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "failing_jobs",
+                  "fields": [
+                    {
+                      "name": "workspace_name",
+                      "expression": "`workspace_name`"
+                    },
+                    {
+                      "name": "job_name",
+                      "expression": "`job_name`"
+                    },
+                    {
+                      "name": "total_runs",
+                      "expression": "`total_runs`"
+                    },
+                    {
+                      "name": "failed_runs",
+                      "expression": "`failed_runs`"
+                    },
+                    {
+                      "name": "success_rate_pct",
+                      "expression": "`success_rate_pct`"
+                    },
+                    {
+                      "name": "last_failure",
+                      "expression": "`last_failure`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "workspace_name",
+                    "displayName": "Workspace"
+                  },
+                  {
+                    "fieldName": "job_name",
+                    "displayName": "Job"
+                  },
+                  {
+                    "fieldName": "total_runs",
+                    "displayName": "Runs"
+                  },
+                  {
+                    "fieldName": "failed_runs",
+                    "displayName": "Failed"
+                  },
+                  {
+                    "fieldName": "success_rate_pct",
+                    "displayName": "Success %"
+                  },
+                  {
+                    "fieldName": "last_failure",
+                    "displayName": "Last failure"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Failing jobs"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 7,
+            "width": 3,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "hl-repair",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "repair_stats",
+                  "fields": [
+                    {
+                      "name": "workspace_name",
+                      "expression": "`workspace_name`"
+                    },
+                    {
+                      "name": "job_name",
+                      "expression": "`job_name`"
+                    },
+                    {
+                      "name": "total_runs",
+                      "expression": "`total_runs`"
+                    },
+                    {
+                      "name": "runs_with_repairs",
+                      "expression": "`runs_with_repairs`"
+                    },
+                    {
+                      "name": "total_repairs",
+                      "expression": "`total_repairs`"
+                    },
+                    {
+                      "name": "repair_rate_pct",
+                      "expression": "`repair_rate_pct`"
+                    },
+                    {
+                      "name": "repaired_but_still_failing",
+                      "expression": "`repaired_but_still_failing`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "workspace_name",
+                    "displayName": "Workspace"
+                  },
+                  {
+                    "fieldName": "job_name",
+                    "displayName": "Job"
+                  },
+                  {
+                    "fieldName": "total_runs",
+                    "displayName": "Runs"
+                  },
+                  {
+                    "fieldName": "runs_with_repairs",
+                    "displayName": "Repaired runs"
+                  },
+                  {
+                    "fieldName": "total_repairs",
+                    "displayName": "Repairs"
+                  },
+                  {
+                    "fieldName": "repair_rate_pct",
+                    "displayName": "Repair %"
+                  },
+                  {
+                    "fieldName": "repaired_but_still_failing",
+                    "displayName": "Still failing"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Repairs"
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 7,
+            "width": 3,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "hl-h3",
+            "multilineTextboxSpec": {
+              "lines": [
+                "### Long-running & slow jobs"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 13,
+            "width": 6,
+            "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "hl-prolong",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "prolonged_jobs",
+                  "fields": [
+                    {
+                      "name": "workspace_name",
+                      "expression": "`workspace_name`"
+                    },
+                    {
+                      "name": "job_name",
+                      "expression": "`job_name`"
+                    },
+                    {
+                      "name": "run_id",
+                      "expression": "`run_id`"
+                    },
+                    {
+                      "name": "start_time",
+                      "expression": "`start_time`"
+                    },
+                    {
+                      "name": "current_hours",
+                      "expression": "`current_hours`"
+                    },
+                    {
+                      "name": "avg_duration_seconds",
+                      "expression": "`avg_duration_seconds`"
+                    },
+                    {
+                      "name": "vs_avg_ratio",
+                      "expression": "`vs_avg_ratio`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "workspace_name",
+                    "displayName": "Workspace"
+                  },
+                  {
+                    "fieldName": "job_name",
+                    "displayName": "Job"
+                  },
+                  {
+                    "fieldName": "run_id",
+                    "displayName": "Run"
+                  },
+                  {
+                    "fieldName": "start_time",
+                    "displayName": "Started"
+                  },
+                  {
+                    "fieldName": "current_hours",
+                    "displayName": "Running (h)"
+                  },
+                  {
+                    "fieldName": "avg_duration_seconds",
+                    "displayName": "Avg (s)"
+                  },
+                  {
+                    "fieldName": "vs_avg_ratio",
+                    "displayName": "x Avg"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "In-flight past threshold"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 14,
+            "width": 3,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "hl-pct",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "duration_percentiles",
+                  "fields": [
+                    {
+                      "name": "workspace_name",
+                      "expression": "`workspace_name`"
+                    },
+                    {
+                      "name": "job_name",
+                      "expression": "`job_name`"
+                    },
+                    {
+                      "name": "run_count",
+                      "expression": "`run_count`"
+                    },
+                    {
+                      "name": "p50_seconds",
+                      "expression": "`p50_seconds`"
+                    },
+                    {
+                      "name": "p95_seconds",
+                      "expression": "`p95_seconds`"
+                    },
+                    {
+                      "name": "p99_seconds",
+                      "expression": "`p99_seconds`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "workspace_name",
+                    "displayName": "Workspace"
+                  },
+                  {
+                    "fieldName": "job_name",
+                    "displayName": "Job"
+                  },
+                  {
+                    "fieldName": "run_count",
+                    "displayName": "Runs"
+                  },
+                  {
+                    "fieldName": "p50_seconds",
+                    "displayName": "p50 (s)"
+                  },
+                  {
+                    "fieldName": "p95_seconds",
+                    "displayName": "p95 (s)"
+                  },
+                  {
+                    "fieldName": "p99_seconds",
+                    "displayName": "p99 (s)"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Duration percentiles"
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 14,
+            "width": 3,
+            "height": 6
+          }
+        }
+      ]
+    },
+    {
+      "name": "page-c59dbce4",
+      "displayName": "Tasks",
+      "pageType": "PAGE_TYPE_CANVAS",
+      "layout": [
+        {
+          "widget": {
+            "name": "tk-note",
+            "multilineTextboxSpec": {
+              "lines": [
+                "### Task-level status  \u2014  requires the task MVs (materialized_views.sql Section C). If those were not created, these widgets will error; remove this page."
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 6,
+            "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "tk-fail-bar",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "task_failures",
+                  "fields": [
+                    {
+                      "name": "task_label",
+                      "expression": "`task_label`"
+                    },
+                    {
+                      "name": "sum(failed_runs)",
+                      "expression": "SUM(`failed_runs`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "task_label",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "y-reversed"
+                    }
+                  },
+                  "displayName": "task_label"
+                },
+                "y": {
+                  "fieldName": "sum(failed_runs)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Tasks by failure count"
+                },
+                "label": {
+                  "show": true
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Tasks by failure count"
+              },
+              "mark": {
+                "colors": [
+                  "#FF3621",
+                  "#FFAB00",
+                  "#00A972",
+                  "#8BCAE7"
+                ]
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 1,
+            "width": 6,
+            "height": 5
+          }
+        },
+        {
+          "widget": {
+            "name": "tk-h",
+            "multilineTextboxSpec": {
+              "lines": [
+                "### Task runs"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 6,
+            "width": 6,
+            "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "tk-runs",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "task_runs_list",
+                  "fields": [
+                    {
+                      "name": "workspace_name",
+                      "expression": "`workspace_name`"
+                    },
+                    {
+                      "name": "job_name",
+                      "expression": "`job_name`"
+                    },
+                    {
+                      "name": "job_run_id",
+                      "expression": "`job_run_id`"
+                    },
+                    {
+                      "name": "task_name",
+                      "expression": "`task_name`"
+                    },
+                    {
+                      "name": "result_state",
+                      "expression": "`result_state`"
+                    },
+                    {
+                      "name": "repair_count",
+                      "expression": "`repair_count`"
+                    },
+                    {
+                      "name": "start_time",
+                      "expression": "`start_time`"
+                    },
+                    {
+                      "name": "duration_minutes",
+                      "expression": "`duration_minutes`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "workspace_name",
+                    "displayName": "Workspace"
+                  },
+                  {
+                    "fieldName": "job_name",
+                    "displayName": "Job"
+                  },
+                  {
+                    "fieldName": "job_run_id",
+                    "displayName": "Job run"
+                  },
+                  {
+                    "fieldName": "task_name",
+                    "displayName": "Task"
+                  },
+                  {
+                    "fieldName": "result_state",
+                    "displayName": "Status"
+                  },
+                  {
+                    "fieldName": "repair_count",
+                    "displayName": "Repairs"
+                  },
+                  {
+                    "fieldName": "start_time",
+                    "displayName": "Start"
+                  },
+                  {
+                    "fieldName": "duration_minutes",
+                    "displayName": "Duration (min)"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Task runs"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 7,
+            "width": 6,
+            "height": 8
+          }
+        }
+      ]
+    },
+    {
+      "name": "page-2ad1e21d",
+      "displayName": "Filters",
+      "pageType": "PAGE_TYPE_GLOBAL_FILTERS",
+      "layout": [
+        {
+          "widget": {
+            "name": "f-ws",
+            "queries": [
+              {
+                "name": "job_runs_list_workspace_name",
+                "query": {
+                  "datasetName": "job_runs_list",
+                  "fields": [
+                    {
+                      "name": "workspace_name",
+                      "expression": "`workspace_name`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-multi-select",
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "workspace_name",
+                    "displayName": "Workspace",
+                    "queryName": "job_runs_list_workspace_name"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Workspace"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 2,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "f-job",
+            "queries": [
+              {
+                "name": "job_runs_list_job_name",
+                "query": {
+                  "datasetName": "job_runs_list",
+                  "fields": [
+                    {
+                      "name": "job_name",
+                      "expression": "`job_name`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-multi-select",
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "job_name",
+                    "displayName": "Job",
+                    "queryName": "job_runs_list_job_name"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Job"
+              }
+            }
+          },
+          "position": {
+            "x": 2,
+            "y": 0,
+            "width": 2,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "f-state",
+            "queries": [
+              {
+                "name": "job_runs_list_result_state",
+                "query": {
+                  "datasetName": "job_runs_list",
+                  "fields": [
+                    {
+                      "name": "result_state",
+                      "expression": "`result_state`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-multi-select",
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "result_state",
+                    "displayName": "Status",
+                    "queryName": "job_runs_list_result_state"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Status"
+              }
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 0,
+            "width": 2,
+            "height": 2
+          }
+        }
+      ]
+    }
+  ],
+  "uiSettings": {
+    "theme": {
+      "widgetHeaderAlignment": "ALIGNMENT_UNSPECIFIED"
+    }
+  }
+}
